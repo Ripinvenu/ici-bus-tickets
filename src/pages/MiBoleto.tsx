@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Search, Ticket, MapPin, Calendar, Clock, User, Mail, Edit, RefreshCw, AlertCircle, Loader2, Check } from 'lucide-react';
+import { Search, Ticket, MapPin, Calendar, Clock, User, Mail, Edit, RefreshCw, AlertCircle, Loader2, Check, CreditCard } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -12,6 +12,7 @@ import { toast } from 'sonner';
 import { Boleto, Ruta, Corrida, Horario, TipoBoleto, LABELS_TIPO_BOLETO } from '@/types/database';
 import { addMonths, format } from 'date-fns';
 import { es } from 'date-fns/locale';
+import { PaymentCardForm } from '@/components/PaymentCardForm';
 
 interface BoletoCompleto extends Boleto {
   corrida: Corrida & {
@@ -42,6 +43,8 @@ export default function MiBoleto() {
   const [rutas, setRutas] = useState<Ruta[]>([]);
   const [horarios, setHorarios] = useState<Horario[]>([]);
   const [precioDiferencia, setPrecioDiferencia] = useState(0);
+  const [isCardValid, setIsCardValid] = useState(false);
+  const [showPaymentStep, setShowPaymentStep] = useState(false);
 
   useEffect(() => {
     const folioParam = searchParams.get('folio');
@@ -168,6 +171,14 @@ export default function MiBoleto() {
     }
   }, [modifyForm.rutaId, rutas, boleto]);
 
+  const handleContinueToPayment = () => {
+    if (precioDiferencia > 0) {
+      setShowPaymentStep(true);
+    } else {
+      handleModificar();
+    }
+  };
+
   const handleModificar = async () => {
     if (!boleto) return;
 
@@ -237,6 +248,7 @@ export default function MiBoleto() {
 
       toast.success('Boleto modificado exitosamente');
       setShowModifyDialog(false);
+      setShowPaymentStep(false);
       buscarBoleto();
     } catch (error) {
       console.error(error);
@@ -410,83 +422,142 @@ export default function MiBoleto() {
                 {/* Actions */}
                 {boleto.estado === 'activo' && (
                   <div className="pt-4 border-t border-border flex gap-3">
-                    <Dialog open={showModifyDialog} onOpenChange={setShowModifyDialog}>
+                     <Dialog open={showModifyDialog} onOpenChange={(open) => {
+                        setShowModifyDialog(open);
+                        if (!open) setShowPaymentStep(false);
+                      }}>
                       <DialogTrigger asChild>
                         <Button variant="outline" className="flex-1">
                           <Edit className="h-4 w-4" />
                           Modificar
                         </Button>
                       </DialogTrigger>
-                      <DialogContent className="max-w-md">
+                      <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
                         <DialogHeader>
-                          <DialogTitle>Modificar Boleto</DialogTitle>
+                          <DialogTitle>
+                            {showPaymentStep ? 'Pagar Diferencia' : 'Modificar Boleto'}
+                          </DialogTitle>
                         </DialogHeader>
-                        <div className="space-y-4 pt-4">
-                          <div>
-                            <Label>Nombre del Pasajero</Label>
-                            <Input
-                              value={modifyForm.nombre}
-                              onChange={(e) => setModifyForm({ ...modifyForm, nombre: e.target.value })}
-                              className="mt-1"
-                            />
-                          </div>
-                          <div>
-                            <Label>Ruta</Label>
-                            <Select value={modifyForm.rutaId} onValueChange={(v) => setModifyForm({ ...modifyForm, rutaId: v, horarioId: '' })}>
-                              <SelectTrigger className="mt-1">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {rutas.map((ruta) => (
-                                  <SelectItem key={ruta.id} value={ruta.id}>
-                                    {ruta.origen} → {ruta.destino} - ${ruta.precio.toFixed(2)}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                          <div>
-                            <Label>Fecha</Label>
-                            <Input
-                              type="date"
-                              min={new Date().toISOString().split('T')[0]}
-                              value={modifyForm.fecha}
-                              onChange={(e) => setModifyForm({ ...modifyForm, fecha: e.target.value })}
-                              className="mt-1"
-                            />
-                          </div>
-                          {horarios.length > 0 && (
+                        
+                        {!showPaymentStep ? (
+                          <div className="space-y-4 pt-4">
                             <div>
-                              <Label>Horario</Label>
-                              <Select value={modifyForm.horarioId} onValueChange={(v) => setModifyForm({ ...modifyForm, horarioId: v })}>
+                              <Label>Nombre del Pasajero</Label>
+                              <Input
+                                value={modifyForm.nombre}
+                                onChange={(e) => setModifyForm({ ...modifyForm, nombre: e.target.value })}
+                                className="mt-1"
+                              />
+                            </div>
+                            <div>
+                              <Label>Ruta</Label>
+                              <Select value={modifyForm.rutaId} onValueChange={(v) => setModifyForm({ ...modifyForm, rutaId: v, horarioId: '' })}>
                                 <SelectTrigger className="mt-1">
-                                  <SelectValue placeholder="Selecciona horario" />
+                                  <SelectValue />
                                 </SelectTrigger>
                                 <SelectContent>
-                                  {horarios.map((h) => (
-                                    <SelectItem key={h.id} value={h.id}>
-                                      {formatTime(h.hora)}
+                                  {rutas.map((ruta) => (
+                                    <SelectItem key={ruta.id} value={ruta.id}>
+                                      {ruta.origen} → {ruta.destino} - ${ruta.precio.toFixed(2)}
                                     </SelectItem>
                                   ))}
                                 </SelectContent>
                               </Select>
                             </div>
-                          )}
-                          {precioDiferencia > 0 && (
-                            <div className="p-4 bg-accent/10 rounded-lg">
-                              <p className="text-sm text-muted-foreground">Diferencia a pagar:</p>
-                              <p className="text-xl font-bold text-primary">${precioDiferencia.toFixed(2)}</p>
+                            <div>
+                              <Label>Fecha</Label>
+                              <Input
+                                type="date"
+                                min={new Date().toISOString().split('T')[0]}
+                                value={modifyForm.fecha}
+                                onChange={(e) => setModifyForm({ ...modifyForm, fecha: e.target.value })}
+                                className="mt-1"
+                              />
                             </div>
-                          )}
-                          <div className="flex gap-3 pt-4">
-                            <Button variant="outline" onClick={() => setShowModifyDialog(false)} className="flex-1">
-                              Cancelar
-                            </Button>
-                            <Button onClick={handleModificar} disabled={isModifying} className="flex-1">
-                              {isModifying ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Guardar Cambios'}
-                            </Button>
+                            {horarios.length > 0 && (
+                              <div>
+                                <Label>Horario</Label>
+                                <Select value={modifyForm.horarioId} onValueChange={(v) => setModifyForm({ ...modifyForm, horarioId: v })}>
+                                  <SelectTrigger className="mt-1">
+                                    <SelectValue placeholder="Selecciona horario" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {horarios.map((h) => (
+                                      <SelectItem key={h.id} value={h.id}>
+                                        {formatTime(h.hora)}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </div>
+                            )}
+                            {precioDiferencia > 0 && (
+                              <div className="p-4 bg-accent/10 rounded-lg">
+                                <p className="text-sm text-muted-foreground">Diferencia a pagar:</p>
+                                <p className="text-xl font-bold text-primary">${precioDiferencia.toFixed(2)}</p>
+                                <p className="text-xs text-muted-foreground mt-1">
+                                  La nueva ruta es más cara. Deberás pagar la diferencia.
+                                </p>
+                              </div>
+                            )}
+                            <div className="flex gap-3 pt-4">
+                              <Button variant="outline" onClick={() => setShowModifyDialog(false)} className="flex-1">
+                                Cancelar
+                              </Button>
+                              <Button onClick={handleContinueToPayment} disabled={isModifying} className="flex-1">
+                                {isModifying ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : precioDiferencia > 0 ? (
+                                  <>
+                                    <CreditCard className="h-4 w-4" />
+                                    Continuar al Pago
+                                  </>
+                                ) : (
+                                  'Guardar Cambios'
+                                )}
+                              </Button>
+                            </div>
                           </div>
-                        </div>
+                        ) : (
+                          <div className="space-y-4 pt-4">
+                            <div className="p-4 bg-secondary/30 rounded-lg space-y-2">
+                              <div className="flex justify-between text-sm">
+                                <span className="text-muted-foreground">Precio anterior:</span>
+                                <span>${boleto.precio_pagado.toFixed(2)}</span>
+                              </div>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-muted-foreground">Nueva ruta:</span>
+                                <span>${rutas.find(r => r.id === modifyForm.rutaId)?.precio.toFixed(2)}</span>
+                              </div>
+                              <div className="border-t border-border pt-2 flex justify-between font-medium">
+                                <span>Diferencia a pagar:</span>
+                                <span className="text-primary">${precioDiferencia.toFixed(2)}</span>
+                              </div>
+                            </div>
+
+                            <PaymentCardForm onValidChange={setIsCardValid} />
+
+                            <div className="flex gap-3 pt-4">
+                              <Button variant="outline" onClick={() => setShowPaymentStep(false)} className="flex-1">
+                                Atrás
+                              </Button>
+                              <Button 
+                                onClick={handleModificar} 
+                                disabled={isModifying || !isCardValid} 
+                                className="flex-1"
+                              >
+                                {isModifying ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <>
+                                    <CreditCard className="h-4 w-4" />
+                                    Pagar ${precioDiferencia.toFixed(2)}
+                                  </>
+                                )}
+                              </Button>
+                            </div>
+                          </div>
+                        )}
                       </DialogContent>
                     </Dialog>
 
