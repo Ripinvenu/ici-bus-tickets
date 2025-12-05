@@ -107,7 +107,7 @@ export default function MiBoleto() {
     }
 
     // Check for free ticket
-    const { data: libreData } = await supabase
+    const { data: libreData, error: libreError } = await supabase
       .from('boletos_libres')
       .select(`
         *,
@@ -123,10 +123,16 @@ export default function MiBoleto() {
       .eq('folio', searchFolio)
       .maybeSingle();
 
+    console.log('Búsqueda boleto libre:', { searchFolio, libreData, libreError });
+
     if (libreData) {
       setBoletoLibre({
-        ...libreData,
-        valor: Number(libreData.valor)
+        id: libreData.id,
+        folio: libreData.folio,
+        valor: Number(libreData.valor),
+        fecha_expiracion: libreData.fecha_expiracion,
+        usado: libreData.usado,
+        boleto_original: libreData.boleto_original
       });
     } else {
       toast.error('No se encontró ningún boleto con ese folio');
