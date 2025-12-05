@@ -401,6 +401,28 @@ export type Database = {
     }
     Functions: {
       generate_folio: { Args: never; Returns: string }
+      get_boleto_by_folio: {
+        Args: { p_folio: string }
+        Returns: {
+          corrida_id: string
+          created_at: string | null
+          email_pasajero: string
+          estado: Database["public"]["Enums"]["estado_boleto"] | null
+          folio: string
+          id: string
+          nombre_pasajero: string
+          precio_pagado: number
+          tipo_boleto: Database["public"]["Enums"]["tipo_boleto"]
+          updated_at: string | null
+          user_id: string | null
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "boletos"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
       is_admin: { Args: never; Returns: boolean }
     }
     Enums: {
