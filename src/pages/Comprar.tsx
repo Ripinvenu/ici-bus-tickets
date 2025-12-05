@@ -65,19 +65,25 @@ export default function Comprar() {
     
     // Check for free ticket redemption
     const libreParam = searchParams.get('libre');
+    console.log('Parámetro libre en URL:', libreParam);
     if (libreParam) {
       fetchBoletoLibre(libreParam);
     }
   }, [searchParams]);
 
   const fetchBoletoLibre = async (id: string) => {
+    console.log('Buscando boleto libre con ID:', id);
+    
     const { data, error } = await supabase
       .from('boletos_libres')
       .select('*')
       .eq('id', id)
-      .single();
+      .maybeSingle();
+
+    console.log('Resultado búsqueda boleto libre:', { data, error });
 
     if (error || !data) {
+      console.error('Error fetching boleto libre:', error, 'ID buscado:', id);
       toast.error('No se encontró el boleto libre');
       navigate('/comprar');
       return;
