@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { MapPin, Calendar, Clock, User, Mail, Ticket, CreditCard, Check, Loader2, ArrowRight } from 'lucide-react';
+import { MapPin, Calendar, Clock, User, Mail, Ticket, CreditCard, Check, Loader2, ArrowRight, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -19,6 +19,14 @@ const pasajeroSchema = z.object({
 });
 
 type Step = 'ruta' | 'horario' | 'pasajero' | 'pago' | 'confirmacion';
+
+interface BoletoLibre {
+  id: string;
+  folio: string;
+  valor: number;
+  fecha_expiracion: string;
+  usado: boolean;
+}
 
 export default function Comprar() {
   const [searchParams] = useSearchParams();
@@ -40,6 +48,10 @@ export default function Comprar() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isCardValid, setIsCardValid] = useState(false);
 
+  // Free ticket state
+  const [boletoLibre, setBoletoLibre] = useState<BoletoLibre | null>(null);
+  const [diferenciaPagar, setDiferenciaPagar] = useState(0);
+
   // Result
   const [folio, setFolio] = useState<string>('');
   const [disponibles, setDisponibles] = useState<number | null>(null);
@@ -50,7 +62,44 @@ export default function Comprar() {
     if (rutaParam) {
       setSelectedRuta(rutaParam);
     }
+    
+    // Check for free ticket redemption
+    const libreParam = searchParams.get('libre');
+    if (libreParam) {
+      fetchBoletoLibre(libreParam);
+    }
   }, [searchParams]);
+
+  const fetchBoletoLibre = async (id: string) => {
+    const { data, error } = await supabase
+      .from('boletos_libres')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error || !data) {
+      toast.error('No se encontró el boleto libre');
+      navigate('/comprar');
+      return;
+    }
+
+    if (data.usado) {
+      toast.error('Este boleto libre ya fue utilizado');
+      navigate('/comprar');
+      return;
+    }
+
+    if (new Date(data.fecha_expiracion) < new Date()) {
+      toast.error('Este boleto libre ha expirado');
+      navigate('/comprar');
+      return;
+    }
+
+    setBoletoLibre({
+      ...data,
+      valor: Number(data.valor)
+    });
+  };
 
   useEffect(() => {
     if (selectedRuta) {
@@ -118,6 +167,24 @@ export default function Comprar() {
     if (!ruta) return 0;
     return ruta.precio * PRECIOS_TIPO_BOLETO[tipoBoleto];
   };
+
+  const calcularPrecioAPagar = () => {
+    const precioTotal = calcularPrecio();
+    if (boletoLibre) {
+      const diferencia = precioTotal - boletoLibre.valor;
+      return diferencia > 0 ? diferencia : 0;
+    }
+    return precioTotal;
+  };
+
+  // Update diferencia when ruta or tipo changes
+  useEffect(() => {
+    if (boletoLibre && selectedRuta) {
+      const precioTotal = calcularPrecio();
+      const diferencia = precioTotal - boletoLibre.valor;
+      setDiferenciaPagar(diferencia > 0 ? diferencia : 0);
+    }
+  }, [selectedRuta, tipoBoleto, boletoLibre]);
 
   const formatTime = (time: string) => {
     const [hours, minutes] = time.split(':');
@@ -245,8 +312,19 @@ export default function Comprar() {
         .update({ boletos_vendidos: (existingCorrida?.boletos_vendidos || 0) + 1 })
         .eq('id', corridaId);
 
-      // 5. If user is logged in, add loyalty points
-      if (user) {
+      // 5. If using a free ticket, mark it as used
+      if (boletoLibre) {
+        await supabase
+          .from('boletos_libres')
+          .update({ 
+            usado: true, 
+            usado_en_boleto_id: boleto.id 
+          })
+          .eq('id', boletoLibre.id);
+      }
+
+      // 6. If user is logged in, add loyalty points (only for paid purchases, not free ticket redemptions)
+      if (user && !boletoLibre) {
         await supabase.from('historial_puntos').insert({
           user_id: user.id,
           boleto_id: boleto.id,
@@ -263,7 +341,7 @@ export default function Comprar() {
 
       setFolio(folioData);
       setStep('confirmacion');
-      toast.success('¡Boleto comprado exitosamente!');
+      toast.success(boletoLibre ? '¡Boleto libre canjeado exitosamente!' : '¡Boleto comprado exitosamente!');
     } catch (error) {
       console.error('Error purchasing:', error);
       toast.error('Error al procesar la compra. Intenta de nuevo.');
@@ -287,10 +365,10 @@ export default function Comprar() {
       <section className="bg-gradient-hero py-12">
         <div className="container mx-auto px-4">
           <h1 className="font-display text-3xl font-bold text-primary-foreground text-center mb-2">
-            Comprar Boletos
+            {boletoLibre ? 'Canjear Boleto Libre' : 'Comprar Boletos'}
           </h1>
           <p className="text-primary-foreground/80 text-center">
-            Sin necesidad de crear cuenta
+            {boletoLibre ? `Usando boleto libre: ${boletoLibre.folio}` : 'Sin necesidad de crear cuenta'}
           </p>
         </div>
       </section>
@@ -366,9 +444,28 @@ export default function Comprar() {
                   </div>
 
                   {selectedRuta && (
-                    <div className="p-4 bg-secondary/50 rounded-lg">
-                      <p className="text-sm text-muted-foreground">Precio del boleto:</p>
-                      <p className="text-2xl font-bold text-primary">${calcularPrecio().toFixed(2)}</p>
+                    <div className="p-4 bg-secondary/50 rounded-lg space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-sm text-muted-foreground">Precio del boleto:</span>
+                        <span className="text-lg font-bold text-primary">${calcularPrecio().toFixed(2)}</span>
+                      </div>
+                      {boletoLibre && (
+                        <>
+                          <div className="flex justify-between">
+                            <span className="text-sm text-muted-foreground">Valor del boleto libre:</span>
+                            <span className="text-lg font-medium text-success">-${boletoLibre.valor.toFixed(2)}</span>
+                          </div>
+                          <div className="border-t border-border pt-2 flex justify-between">
+                            <span className="text-sm font-medium">A pagar:</span>
+                            <span className="text-xl font-bold text-primary">
+                              ${calcularPrecioAPagar().toFixed(2)}
+                            </span>
+                          </div>
+                          {calcularPrecioAPagar() === 0 && (
+                            <p className="text-sm text-success">¡No necesitas pagar nada adicional!</p>
+                          )}
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -517,13 +614,37 @@ export default function Comprar() {
                     <CreditCard className="h-5 w-5 text-primary" />
                   </div>
                   <div>
-                    <h2 className="font-display text-xl font-semibold">Datos de Pago</h2>
-                    <p className="text-sm text-muted-foreground">Ingresa los datos de tu tarjeta</p>
+                    <h2 className="font-display text-xl font-semibold">
+                      {boletoLibre && calcularPrecioAPagar() === 0 ? 'Confirmar Canje' : 'Datos de Pago'}
+                    </h2>
+                    <p className="text-sm text-muted-foreground">
+                      {boletoLibre && calcularPrecioAPagar() === 0 
+                        ? 'Confirma los detalles de tu viaje' 
+                        : 'Ingresa los datos de tu tarjeta'}
+                    </p>
                   </div>
                 </div>
 
-                {/* Payment Card Form */}
-                <PaymentCardForm onValidChange={setIsCardValid} />
+                {/* Payment Card Form - Only show if there's something to pay */}
+                {calcularPrecioAPagar() > 0 && (
+                  <PaymentCardForm onValidChange={setIsCardValid} />
+                )}
+
+                {/* Free ticket info */}
+                {boletoLibre && (
+                  <div className="bg-accent/10 border border-accent/30 rounded-lg p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <RefreshCw className="h-4 w-4 text-accent" />
+                      <span className="font-medium text-accent-foreground">Boleto Libre</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      Folio: <span className="font-mono">{boletoLibre.folio}</span>
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      Valor: ${boletoLibre.valor.toFixed(2)}
+                    </p>
+                  </div>
+                )}
 
                 {/* Summary */}
                 <div className="bg-secondary/30 rounded-lg p-4 space-y-3">
@@ -547,13 +668,25 @@ export default function Comprar() {
                     <span className="text-muted-foreground">Tipo</span>
                     <span className="font-medium">{LABELS_TIPO_BOLETO[tipoBoleto]}</span>
                   </div>
+                  {boletoLibre && (
+                    <>
+                      <div className="flex justify-between text-muted-foreground">
+                        <span>Precio boleto</span>
+                        <span>${calcularPrecio().toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between text-success">
+                        <span>Boleto libre aplicado</span>
+                        <span>-${boletoLibre.valor.toFixed(2)}</span>
+                      </div>
+                    </>
+                  )}
                   <div className="border-t border-border pt-3 flex justify-between">
                     <span className="font-semibold">Total a Pagar</span>
-                    <span className="text-2xl font-bold text-primary">${calcularPrecio().toFixed(2)}</span>
+                    <span className="text-2xl font-bold text-primary">${calcularPrecioAPagar().toFixed(2)}</span>
                   </div>
                 </div>
 
-                {!user && (
+                {!user && !boletoLibre && (
                   <div className="bg-accent/10 border border-accent/30 rounded-lg p-4 text-sm">
                     <p className="text-accent-foreground">
                       💡 <strong>Tip:</strong> Si inicias sesión, acumularás puntos en el programa de fidelidad.
@@ -565,16 +698,25 @@ export default function Comprar() {
                   <Button variant="outline" onClick={() => setStep('pasajero')} className="flex-1">
                     Atrás
                   </Button>
-                  <Button onClick={handleComprar} className="flex-1" disabled={isPurchasing || !isCardValid}>
+                  <Button 
+                    onClick={handleComprar} 
+                    className="flex-1" 
+                    disabled={isPurchasing || (calcularPrecioAPagar() > 0 && !isCardValid)}
+                  >
                     {isPurchasing ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin" />
                         Procesando...
                       </>
+                    ) : calcularPrecioAPagar() === 0 ? (
+                      <>
+                        <Check className="h-4 w-4" />
+                        Confirmar Canje
+                      </>
                     ) : (
                       <>
                         <CreditCard className="h-4 w-4" />
-                        Pagar ${calcularPrecio().toFixed(2)}
+                        Pagar ${calcularPrecioAPagar().toFixed(2)}
                       </>
                     )}
                   </Button>
