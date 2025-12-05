@@ -1,5 +1,5 @@
-import { Bus, Mail, Phone, MapPin } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Bus, Mail, Phone, MapPin } from "lucide-react";
+import { Link } from "react-router-dom";
 
 export function Footer() {
   return (
@@ -18,8 +18,7 @@ export function Footer() {
               </div>
             </div>
             <p className="text-primary-foreground/80 max-w-md">
-              Conectando destinos con seguridad, comodidad y puntualidad. 
-              Más de 20 años llevándote a donde necesitas llegar.
+              Conectando destinos con seguridad, comodidad y puntualidad. Ofreciendo precios justos.
             </p>
           </div>
 
@@ -64,7 +63,7 @@ export function Footer() {
               </li>
               <li className="flex items-start gap-2 text-primary-foreground/80">
                 <MapPin className="h-4 w-4 mt-1" />
-                <span>Terminal Central, CDMX</span>
+                <span>Central de autobuses Aguascalientes, Ags.</span>
               </li>
             </ul>
           </div>
