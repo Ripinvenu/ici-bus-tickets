@@ -320,7 +320,7 @@ function BoletoLibreCard({ boleto }: { boleto: BoletoLibreConDetalles }) {
         </div>
         {isValid && (
           <Button className="w-full mt-4" variant="accent" asChild>
-            <Link to={`/mi-boleto?folio=${boleto.folio}`}>
+            <Link to={`/mi-boleto?folio=${boleto.boleto_original.folio}`}>
               Usar Boleto Libre
               <ChevronRight className="h-4 w-4" />
             </Link>

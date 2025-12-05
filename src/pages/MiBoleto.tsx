@@ -118,16 +118,37 @@ export default function MiBoleto() {
         rutaId: boletoData.corrida.ruta_id,
         horarioId: boletoData.corrida.horario_id,
       });
+
+      // If this ticket was converted to libre, fetch the libre ticket info
+      if (boletoData.estado === 'convertido_libre') {
+        const { data: libreData } = await supabase
+          .from('boletos_libres')
+          .select('*')
+          .eq('boleto_original_id', boletoData.id)
+          .eq('usado', false)
+          .maybeSingle();
+
+        if (libreData) {
+          setBoletoLibre({
+            id: libreData.id,
+            folio: libreData.folio,
+            valor: Number(libreData.valor),
+            fecha_expiracion: libreData.fecha_expiracion,
+            usado: libreData.usado,
+          });
+        }
+      }
+
       setIsLoading(false);
       return;
     }
 
-    // Check for free ticket
+    // Check for free ticket by LIBRE-... folio (fallback)
     const { data: libreData, error: libreError } = await supabase
       .from('boletos_libres')
       .select(`
         *,
-        boleto_original:boletos(
+        boleto_original:boletos!boletos_libres_boleto_original_id_fkey(
           *,
           corrida:corridas(
             *,
@@ -141,14 +162,35 @@ export default function MiBoleto() {
 
     console.log('Búsqueda boleto libre:', { searchFolio, libreData, libreError });
 
-    if (libreData) {
+    if (libreData && libreData.boleto_original) {
+      // Set the original boleto so we can use the normal modification flow
+      const originalBoleto = libreData.boleto_original as any;
+      const processed = {
+        ...originalBoleto,
+        precio_pagado: Number(originalBoleto.precio_pagado),
+        corrida: {
+          ...originalBoleto.corrida,
+          ruta: {
+            ...originalBoleto.corrida.ruta,
+            precio: Number(originalBoleto.corrida.ruta.precio)
+          }
+        }
+      };
+      setBoleto(processed as BoletoCompleto);
+      setModifyForm({
+        nombre: originalBoleto.nombre_pasajero,
+        fecha: originalBoleto.corrida.fecha,
+        rutaId: originalBoleto.corrida.ruta_id,
+        horarioId: originalBoleto.corrida.horario_id,
+      });
+      
+      // Also set the libre info for price calculations
       setBoletoLibre({
         id: libreData.id,
         folio: libreData.folio,
         valor: Number(libreData.valor),
         fecha_expiracion: libreData.fecha_expiracion,
         usado: libreData.usado,
-        boleto_original: libreData.boleto_original
       });
     } else {
       toast.error('No se encontró ningún boleto con ese folio');
@@ -184,16 +226,17 @@ export default function MiBoleto() {
   useEffect(() => {
     if (modifyForm.rutaId) {
       fetchHorarios(modifyForm.rutaId);
-      // Calculate price difference
+      // Calculate price difference - use boletoLibre value if available
       const newRuta = rutas.find(r => r.id === modifyForm.rutaId);
       if (newRuta && boleto) {
-        const diff = newRuta.precio - boleto.precio_pagado;
+        const basePrice = boletoLibre ? boletoLibre.valor : boleto.precio_pagado;
+        const diff = newRuta.precio - basePrice;
         setPrecioDiferencia(diff > 0 ? diff : 0);
       }
     }
-  }, [modifyForm.rutaId, rutas, boleto]);
+  }, [modifyForm.rutaId, rutas, boleto, boletoLibre]);
 
-  // Effect for libre ticket form
+  // Effect for libre ticket form (fallback UI)
   useEffect(() => {
     if (libreModifyForm.rutaId) {
       fetchHorarios(libreModifyForm.rutaId);
@@ -209,6 +252,8 @@ export default function MiBoleto() {
   const handleContinueToPayment = () => {
     if (precioDiferencia > 0) {
       setShowPaymentStep(true);
+    } else if (boletoLibre) {
+      handleUsarBoletoLibreFromOriginal();
     } else {
       handleModificar();
     }
@@ -314,6 +359,101 @@ export default function MiBoleto() {
     }
 
     setIsUsingLibre(false);
+  };
+
+  // Function to use boleto libre when accessed from original ticket
+  const handleUsarBoletoLibreFromOriginal = async () => {
+    if (!boletoLibre || !boleto) return;
+
+    setIsModifying(true);
+
+    try {
+      // 1. Get or create corrida
+      const horario = horarios.find(h => h.id === modifyForm.horarioId);
+      let corridaId: string;
+      
+      const { data: existingCorrida } = await supabase
+        .from('corridas')
+        .select('*')
+        .eq('horario_id', modifyForm.horarioId)
+        .eq('fecha', modifyForm.fecha)
+        .maybeSingle();
+
+      if (existingCorrida) {
+        if (existingCorrida.boletos_vendidos >= existingCorrida.capacidad) {
+          toast.error('No hay lugares disponibles para esa corrida');
+          setIsModifying(false);
+          return;
+        }
+        corridaId = existingCorrida.id;
+      } else {
+        const { data: newCorrida, error } = await supabase
+          .from('corridas')
+          .insert({
+            ruta_id: modifyForm.rutaId,
+            horario_id: modifyForm.horarioId,
+            fecha: modifyForm.fecha,
+            hora: horario?.hora || '00:00',
+          })
+          .select()
+          .single();
+
+        if (error || !newCorrida) throw new Error('Error creating corrida');
+        corridaId = newCorrida.id;
+      }
+
+      // 2. Generate new folio
+      const { data: folioData, error: folioError } = await supabase.rpc('generate_folio');
+      if (folioError || !folioData) {
+        throw new Error('Error al generar folio');
+      }
+
+      // 3. Create new boleto
+      const precioRuta = rutas.find(r => r.id === modifyForm.rutaId)?.precio || 0;
+      const { data: newBoleto, error: boletoError } = await supabase
+        .from('boletos')
+        .insert({
+          folio: folioData,
+          corrida_id: corridaId,
+          user_id: user?.id || null,
+          nombre_pasajero: modifyForm.nombre,
+          email_pasajero: boleto.email_pasajero,
+          tipo_boleto: boleto.tipo_boleto,
+          precio_pagado: precioRuta,
+          estado: 'activo',
+        })
+        .select()
+        .single();
+
+      if (boletoError || !newBoleto) throw new Error('Error al crear el boleto');
+
+      // 4. Update corrida count
+      await supabase
+        .from('corridas')
+        .update({ boletos_vendidos: (existingCorrida?.boletos_vendidos || 0) + 1 })
+        .eq('id', corridaId);
+
+      // 5. Mark boleto libre as used
+      await supabase
+        .from('boletos_libres')
+        .update({ 
+          usado: true, 
+          usado_en_boleto_id: newBoleto.id 
+        })
+        .eq('id', boletoLibre.id);
+
+      toast.success('¡Boleto creado exitosamente!');
+      setShowModifyDialog(false);
+      setShowPaymentStep(false);
+      
+      // Navigate to the new ticket
+      navigate(`/mi-boleto?folio=${folioData}`, { replace: true });
+    } catch (error) {
+      console.error(error);
+      toast.error('Error al usar el boleto libre');
+    }
+
+    setIsModifying(false);
   };
 
   const handleModificar = async () => {
@@ -556,164 +696,206 @@ export default function MiBoleto() {
                   </div>
                 </div>
 
-                {/* Actions */}
-                {boleto.estado === 'activo' && (
-                  <div className="pt-4 border-t border-border flex gap-3">
-                     <Dialog open={showModifyDialog} onOpenChange={(open) => {
+                {/* Actions - Show for active tickets OR converted tickets with unused libre */}
+                {(boleto.estado === 'activo' || (boleto.estado === 'convertido_libre' && boletoLibre && !boletoLibre.usado)) && (
+                  <div className="pt-4 border-t border-border">
+                    {/* Show libre ticket info if this is a converted ticket */}
+                    {boleto.estado === 'convertido_libre' && boletoLibre && (
+                      <div className="mb-4 p-4 bg-accent/10 rounded-lg">
+                        <div className="flex items-center gap-2 mb-2">
+                          <RefreshCw className="h-4 w-4 text-accent" />
+                          <span className="font-medium text-accent">Boleto Libre Disponible</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-sm">
+                          <div>
+                            <span className="text-muted-foreground">Valor:</span>
+                            <span className="ml-2 font-semibold">${boletoLibre.valor.toFixed(2)}</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Expira:</span>
+                            <span className="ml-2">{format(new Date(boletoLibre.fecha_expiracion), "d MMM yyyy", { locale: es })}</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex gap-3">
+                      <Dialog open={showModifyDialog} onOpenChange={(open) => {
                         setShowModifyDialog(open);
                         if (!open) setShowPaymentStep(false);
                       }}>
-                      <DialogTrigger asChild>
-                        <Button variant="outline" className="flex-1">
-                          <Edit className="h-4 w-4" />
-                          Modificar
-                        </Button>
-                      </DialogTrigger>
-                      <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
-                        <DialogHeader>
-                          <DialogTitle>
-                            {showPaymentStep ? 'Pagar Diferencia' : 'Modificar Boleto'}
-                          </DialogTitle>
-                        </DialogHeader>
-                        
-                        {!showPaymentStep ? (
-                          <div className="space-y-4 pt-4">
-                            <div>
-                              <Label>Nombre del Pasajero</Label>
-                              <Input
-                                value={modifyForm.nombre}
-                                onChange={(e) => setModifyForm({ ...modifyForm, nombre: e.target.value })}
-                                className="mt-1"
-                              />
-                            </div>
-                            <div>
-                              <Label>Ruta</Label>
-                              <Select value={modifyForm.rutaId} onValueChange={(v) => setModifyForm({ ...modifyForm, rutaId: v, horarioId: '' })}>
-                                <SelectTrigger className="mt-1">
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {rutas.map((ruta) => (
-                                    <SelectItem key={ruta.id} value={ruta.id}>
-                                      {ruta.origen} → {ruta.destino} - ${ruta.precio.toFixed(2)}
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            <div>
-                              <Label>Fecha</Label>
-                              <Input
-                                type="date"
-                                min={new Date().toISOString().split('T')[0]}
-                                value={modifyForm.fecha}
-                                onChange={(e) => setModifyForm({ ...modifyForm, fecha: e.target.value })}
-                                className="mt-1"
-                              />
-                            </div>
-                            {horarios.length > 0 && (
+                        <DialogTrigger asChild>
+                          <Button variant="outline" className="flex-1">
+                            <Edit className="h-4 w-4" />
+                            {boleto.estado === 'convertido_libre' ? 'Usar Boleto Libre' : 'Modificar'}
+                          </Button>
+                        </DialogTrigger>
+                        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+                          <DialogHeader>
+                            <DialogTitle>
+                              {showPaymentStep ? 'Pagar Diferencia' : 
+                               boleto.estado === 'convertido_libre' ? 'Usar Boleto Libre' : 'Modificar Boleto'}
+                            </DialogTitle>
+                          </DialogHeader>
+                          
+                          {!showPaymentStep ? (
+                            <div className="space-y-4 pt-4">
                               <div>
-                                <Label>Horario</Label>
-                                <Select value={modifyForm.horarioId} onValueChange={(v) => setModifyForm({ ...modifyForm, horarioId: v })}>
+                                <Label>Nombre del Pasajero</Label>
+                                <Input
+                                  value={modifyForm.nombre}
+                                  onChange={(e) => setModifyForm({ ...modifyForm, nombre: e.target.value })}
+                                  className="mt-1"
+                                />
+                              </div>
+                              <div>
+                                <Label>Ruta</Label>
+                                <Select value={modifyForm.rutaId} onValueChange={(v) => setModifyForm({ ...modifyForm, rutaId: v, horarioId: '' })}>
                                   <SelectTrigger className="mt-1">
-                                    <SelectValue placeholder="Selecciona horario" />
+                                    <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent>
-                                    {horarios.map((h) => (
-                                      <SelectItem key={h.id} value={h.id}>
-                                        {formatTime(h.hora)}
+                                    {rutas.map((ruta) => (
+                                      <SelectItem key={ruta.id} value={ruta.id}>
+                                        {ruta.origen} → {ruta.destino} - ${ruta.precio.toFixed(2)}
                                       </SelectItem>
                                     ))}
                                   </SelectContent>
                                 </Select>
                               </div>
-                            )}
-                            {precioDiferencia > 0 && (
-                              <div className="p-4 bg-accent/10 rounded-lg">
-                                <p className="text-sm text-muted-foreground">Diferencia a pagar:</p>
-                                <p className="text-xl font-bold text-primary">${precioDiferencia.toFixed(2)}</p>
-                                <p className="text-xs text-muted-foreground mt-1">
-                                  La nueva ruta es más cara. Deberás pagar la diferencia.
-                                </p>
+                              <div>
+                                <Label>Fecha</Label>
+                                <Input
+                                  type="date"
+                                  min={new Date().toISOString().split('T')[0]}
+                                  max={boletoLibre?.fecha_expiracion || undefined}
+                                  value={modifyForm.fecha}
+                                  onChange={(e) => setModifyForm({ ...modifyForm, fecha: e.target.value })}
+                                  className="mt-1"
+                                />
                               </div>
-                            )}
-                            <div className="flex gap-3 pt-4">
-                              <Button variant="outline" onClick={() => setShowModifyDialog(false)} className="flex-1">
-                                Cancelar
-                              </Button>
-                              <Button onClick={handleContinueToPayment} disabled={isModifying} className="flex-1">
-                                {isModifying ? (
-                                  <Loader2 className="h-4 w-4 animate-spin" />
-                                ) : precioDiferencia > 0 ? (
-                                  <>
-                                    <CreditCard className="h-4 w-4" />
-                                    Continuar al Pago
-                                  </>
-                                ) : (
-                                  'Guardar Cambios'
-                                )}
-                              </Button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="space-y-4 pt-4">
-                            <div className="p-4 bg-secondary/30 rounded-lg space-y-2">
-                              <div className="flex justify-between text-sm">
-                                <span className="text-muted-foreground">Precio anterior:</span>
-                                <span>${boleto.precio_pagado.toFixed(2)}</span>
-                              </div>
-                              <div className="flex justify-between text-sm">
-                                <span className="text-muted-foreground">Nueva ruta:</span>
-                                <span>${rutas.find(r => r.id === modifyForm.rutaId)?.precio.toFixed(2)}</span>
-                              </div>
-                              <div className="border-t border-border pt-2 flex justify-between font-medium">
-                                <span>Diferencia a pagar:</span>
-                                <span className="text-primary">${precioDiferencia.toFixed(2)}</span>
-                              </div>
-                            </div>
+                              {horarios.length > 0 && (
+                                <div>
+                                  <Label>Horario</Label>
+                                  <Select value={modifyForm.horarioId} onValueChange={(v) => setModifyForm({ ...modifyForm, horarioId: v })}>
+                                    <SelectTrigger className="mt-1">
+                                      <SelectValue placeholder="Selecciona horario" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {horarios.map((h) => (
+                                        <SelectItem key={h.id} value={h.id}>
+                                          {formatTime(h.hora)}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                              )}
+                              
+                              {/* Price summary */}
+                              {modifyForm.rutaId && (
+                                <div className="p-4 bg-secondary/30 rounded-lg space-y-2">
+                                  <div className="flex justify-between text-sm">
+                                    <span className="text-muted-foreground">
+                                      {boletoLibre ? 'Valor del boleto libre:' : 'Precio anterior:'}
+                                    </span>
+                                    <span>${(boletoLibre?.valor || boleto.precio_pagado).toFixed(2)}</span>
+                                  </div>
+                                  <div className="flex justify-between text-sm">
+                                    <span className="text-muted-foreground">Precio de la ruta:</span>
+                                    <span>${rutas.find(r => r.id === modifyForm.rutaId)?.precio.toFixed(2) || '0.00'}</span>
+                                  </div>
+                                  <div className="border-t border-border pt-2 flex justify-between font-medium">
+                                    <span>Diferencia a pagar:</span>
+                                    <span className={precioDiferencia > 0 ? 'text-primary' : 'text-success'}>
+                                      {precioDiferencia > 0 ? `$${precioDiferencia.toFixed(2)}` : 'Gratis'}
+                                    </span>
+                                  </div>
+                                </div>
+                              )}
 
-                            <PaymentCardForm onValidChange={setIsCardValid} />
-
-                            <div className="flex gap-3 pt-4">
-                              <Button variant="outline" onClick={() => setShowPaymentStep(false)} className="flex-1">
-                                Atrás
-                              </Button>
-                              <Button 
-                                onClick={handleModificar} 
-                                disabled={isModifying || !isCardValid} 
-                                className="flex-1"
-                              >
-                                {isModifying ? (
-                                  <Loader2 className="h-4 w-4 animate-spin" />
-                                ) : (
-                                  <>
-                                    <CreditCard className="h-4 w-4" />
-                                    Pagar ${precioDiferencia.toFixed(2)}
-                                  </>
-                                )}
-                              </Button>
+                              <div className="flex gap-3 pt-4">
+                                <Button variant="outline" onClick={() => setShowModifyDialog(false)} className="flex-1">
+                                  Cancelar
+                                </Button>
+                                <Button onClick={handleContinueToPayment} disabled={isModifying} className="flex-1">
+                                  {isModifying ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : precioDiferencia > 0 ? (
+                                    <>
+                                      <CreditCard className="h-4 w-4" />
+                                      Continuar al Pago
+                                    </>
+                                  ) : (
+                                    boletoLibre ? 'Confirmar Boleto' : 'Guardar Cambios'
+                                  )}
+                                </Button>
+                              </div>
                             </div>
-                          </div>
-                        )}
-                      </DialogContent>
-                    </Dialog>
+                          ) : (
+                            <div className="space-y-4 pt-4">
+                              <div className="p-4 bg-secondary/30 rounded-lg space-y-2">
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-muted-foreground">
+                                    {boletoLibre ? 'Valor del boleto libre:' : 'Precio anterior:'}
+                                  </span>
+                                  <span>${(boletoLibre?.valor || boleto.precio_pagado).toFixed(2)}</span>
+                                </div>
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-muted-foreground">Nueva ruta:</span>
+                                  <span>${rutas.find(r => r.id === modifyForm.rutaId)?.precio.toFixed(2)}</span>
+                                </div>
+                                <div className="border-t border-border pt-2 flex justify-between font-medium">
+                                  <span>Diferencia a pagar:</span>
+                                  <span className="text-primary">${precioDiferencia.toFixed(2)}</span>
+                                </div>
+                              </div>
 
-                    <Button variant="accent" onClick={handleConvertirALibre} disabled={isConverting} className="flex-1">
-                      {isConverting ? <Loader2 className="h-4 w-4 animate-spin" /> : (
-                        <>
-                          <RefreshCw className="h-4 w-4" />
-                          Convertir a Libre
-                        </>
+                              <PaymentCardForm onValidChange={setIsCardValid} />
+
+                              <div className="flex gap-3 pt-4">
+                                <Button variant="outline" onClick={() => setShowPaymentStep(false)} className="flex-1">
+                                  Atrás
+                                </Button>
+                                <Button 
+                                  onClick={boletoLibre ? handleUsarBoletoLibreFromOriginal : handleModificar} 
+                                  disabled={isModifying || !isCardValid} 
+                                  className="flex-1"
+                                >
+                                  {isModifying ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <>
+                                      <CreditCard className="h-4 w-4" />
+                                      Pagar ${precioDiferencia.toFixed(2)}
+                                    </>
+                                  )}
+                                </Button>
+                              </div>
+                            </div>
+                          )}
+                        </DialogContent>
+                      </Dialog>
+
+                      {boleto.estado === 'activo' && (
+                        <Button variant="accent" onClick={handleConvertirALibre} disabled={isConverting} className="flex-1">
+                          {isConverting ? <Loader2 className="h-4 w-4 animate-spin" /> : (
+                            <>
+                              <RefreshCw className="h-4 w-4" />
+                              Convertir a Libre
+                            </>
+                          )}
+                        </Button>
                       )}
-                    </Button>
+                    </div>
                   </div>
                 )}
               </div>
             </div>
           )}
 
-          {/* Free Ticket - Now behaves like a modifiable ticket */}
-          {boletoLibre && (
+          {/* Free Ticket fallback UI - Only shown when searching directly by LIBRE-... folio (no boleto found) */}
+          {boletoLibre && !boleto && (
             <div className="card-elevated overflow-hidden animate-fade-in">
               {/* Header */}
               <div className="bg-gradient-accent p-6 text-accent-foreground">
