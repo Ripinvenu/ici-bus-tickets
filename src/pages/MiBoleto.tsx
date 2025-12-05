@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Layout } from '@/components/layout/Layout';
 import { supabase } from '@/integrations/supabase/client';
+import { useAuth } from '@/lib/auth-context';
 import { toast } from 'sonner';
 import { Boleto, Ruta, Corrida, Horario, TipoBoleto, LABELS_TIPO_BOLETO } from '@/types/database';
 import { addMonths, format } from 'date-fns';
@@ -24,6 +25,7 @@ interface BoletoCompleto extends Boleto {
 export default function MiBoleto() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
   
   const [folio, setFolio] = useState(searchParams.get('folio') || '');
   const [boleto, setBoleto] = useState<BoletoCompleto | null>(null);
@@ -32,7 +34,7 @@ export default function MiBoleto() {
   const [isConverting, setIsConverting] = useState(false);
   const [boletoLibre, setBoletoLibre] = useState<any>(null);
 
-  // Modification state
+  // Modification state for regular tickets
   const [showModifyDialog, setShowModifyDialog] = useState(false);
   const [modifyForm, setModifyForm] = useState({
     nombre: '',
@@ -45,6 +47,20 @@ export default function MiBoleto() {
   const [precioDiferencia, setPrecioDiferencia] = useState(0);
   const [isCardValid, setIsCardValid] = useState(false);
   const [showPaymentStep, setShowPaymentStep] = useState(false);
+
+  // Modification state for free tickets (boleto libre)
+  const [showLibreModifyDialog, setShowLibreModifyDialog] = useState(false);
+  const [libreModifyForm, setLibreModifyForm] = useState({
+    nombre: '',
+    email: '',
+    fecha: '',
+    rutaId: '',
+    horarioId: '',
+  });
+  const [librePrecioDiferencia, setLibrePrecioDiferencia] = useState(0);
+  const [isLibreCardValid, setIsLibreCardValid] = useState(false);
+  const [showLibrePaymentStep, setShowLibrePaymentStep] = useState(false);
+  const [isUsingLibre, setIsUsingLibre] = useState(false);
 
   useEffect(() => {
     const folioParam = searchParams.get('folio');
@@ -177,12 +193,127 @@ export default function MiBoleto() {
     }
   }, [modifyForm.rutaId, rutas, boleto]);
 
+  // Effect for libre ticket form
+  useEffect(() => {
+    if (libreModifyForm.rutaId) {
+      fetchHorarios(libreModifyForm.rutaId);
+      // Calculate price difference for libre ticket
+      const newRuta = rutas.find(r => r.id === libreModifyForm.rutaId);
+      if (newRuta && boletoLibre) {
+        const diff = newRuta.precio - boletoLibre.valor;
+        setLibrePrecioDiferencia(diff > 0 ? diff : 0);
+      }
+    }
+  }, [libreModifyForm.rutaId, rutas, boletoLibre]);
+
   const handleContinueToPayment = () => {
     if (precioDiferencia > 0) {
       setShowPaymentStep(true);
     } else {
       handleModificar();
     }
+  };
+
+  const handleLibreContinueToPayment = () => {
+    if (librePrecioDiferencia > 0) {
+      setShowLibrePaymentStep(true);
+    } else {
+      handleUsarBoletoLibre();
+    }
+  };
+
+  const handleUsarBoletoLibre = async () => {
+    if (!boletoLibre) return;
+
+    setIsUsingLibre(true);
+
+    try {
+      // 1. Get or create corrida
+      const horario = horarios.find(h => h.id === libreModifyForm.horarioId);
+      let corridaId: string;
+      
+      const { data: existingCorrida } = await supabase
+        .from('corridas')
+        .select('*')
+        .eq('horario_id', libreModifyForm.horarioId)
+        .eq('fecha', libreModifyForm.fecha)
+        .maybeSingle();
+
+      if (existingCorrida) {
+        if (existingCorrida.boletos_vendidos >= existingCorrida.capacidad) {
+          toast.error('No hay lugares disponibles para esa corrida');
+          setIsUsingLibre(false);
+          return;
+        }
+        corridaId = existingCorrida.id;
+      } else {
+        const { data: newCorrida, error } = await supabase
+          .from('corridas')
+          .insert({
+            ruta_id: libreModifyForm.rutaId,
+            horario_id: libreModifyForm.horarioId,
+            fecha: libreModifyForm.fecha,
+            hora: horario?.hora || '00:00',
+          })
+          .select()
+          .single();
+
+        if (error || !newCorrida) throw new Error('Error creating corrida');
+        corridaId = newCorrida.id;
+      }
+
+      // 2. Generate new folio
+      const { data: folioData, error: folioError } = await supabase.rpc('generate_folio');
+      if (folioError || !folioData) {
+        throw new Error('Error al generar folio');
+      }
+
+      // 3. Create new boleto
+      const precioRuta = rutas.find(r => r.id === libreModifyForm.rutaId)?.precio || 0;
+      const { data: newBoleto, error: boletoError } = await supabase
+        .from('boletos')
+        .insert({
+          folio: folioData,
+          corrida_id: corridaId,
+          user_id: user?.id || null,
+          nombre_pasajero: libreModifyForm.nombre,
+          email_pasajero: libreModifyForm.email,
+          tipo_boleto: 'adulto',
+          precio_pagado: precioRuta,
+          estado: 'activo',
+        })
+        .select()
+        .single();
+
+      if (boletoError || !newBoleto) throw new Error('Error al crear el boleto');
+
+      // 4. Update corrida count
+      await supabase
+        .from('corridas')
+        .update({ boletos_vendidos: (existingCorrida?.boletos_vendidos || 0) + 1 })
+        .eq('id', corridaId);
+
+      // 5. Mark boleto libre as used
+      await supabase
+        .from('boletos_libres')
+        .update({ 
+          usado: true, 
+          usado_en_boleto_id: newBoleto.id 
+        })
+        .eq('id', boletoLibre.id);
+
+      toast.success('¡Boleto creado exitosamente!');
+      setShowLibreModifyDialog(false);
+      setShowLibrePaymentStep(false);
+      
+      // Navigate to the new ticket
+      navigate(`/mi-boleto?folio=${folioData}`, { replace: true });
+    } catch (error) {
+      console.error(error);
+      toast.error('Error al usar el boleto libre');
+    }
+
+    setIsUsingLibre(false);
   };
 
   const handleModificar = async () => {
@@ -581,9 +712,10 @@ export default function MiBoleto() {
             </div>
           )}
 
-          {/* Free Ticket */}
+          {/* Free Ticket - Now behaves like a modifiable ticket */}
           {boletoLibre && (
             <div className="card-elevated overflow-hidden animate-fade-in">
+              {/* Header */}
               <div className="bg-gradient-accent p-6 text-accent-foreground">
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-3">
@@ -600,14 +732,15 @@ export default function MiBoleto() {
                 <p className="font-mono text-lg font-bold">{boletoLibre.folio}</p>
               </div>
 
+              {/* Content - Similar to regular ticket */}
               <div className="p-6 space-y-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <p className="text-sm text-muted-foreground">Valor</p>
+                    <p className="text-sm text-muted-foreground">Valor disponible</p>
                     <p className="text-2xl font-bold text-primary">${boletoLibre.valor.toFixed(2)}</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-sm text-muted-foreground">Expira</p>
+                    <p className="text-sm text-muted-foreground">Válido hasta</p>
                     <p className="font-medium">
                       {format(new Date(boletoLibre.fecha_expiracion), "d 'de' MMMM, yyyy", { locale: es })}
                     </p>
@@ -616,13 +749,168 @@ export default function MiBoleto() {
 
                 <div className="bg-secondary/30 rounded-lg p-4 text-sm">
                   <AlertCircle className="h-4 w-4 inline mr-2 text-accent" />
-                  Este boleto puede canjearse por cualquier ruta. Si la ruta cuesta más, deberás pagar la diferencia.
+                  Selecciona una ruta, fecha y horario para usar este boleto. Si el viaje cuesta más, pagarás la diferencia.
                 </div>
 
+                {/* Actions - Just like regular ticket modification */}
                 {!boletoLibre.usado && (
-                  <Button onClick={() => navigate(`/comprar?libre=${boletoLibre.id}`)} className="w-full">
-                    Canjear Boleto Libre
-                  </Button>
+                  <Dialog open={showLibreModifyDialog} onOpenChange={(open) => {
+                    setShowLibreModifyDialog(open);
+                    if (!open) setShowLibrePaymentStep(false);
+                  }}>
+                    <DialogTrigger asChild>
+                      <Button className="w-full" onClick={() => {
+                        fetchRutas();
+                        setLibreModifyForm({ nombre: '', email: '', fecha: '', rutaId: '', horarioId: '' });
+                      }}>
+                        <Edit className="h-4 w-4 mr-2" />
+                        Usar Boleto Libre
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+                      <DialogHeader>
+                        <DialogTitle>
+                          {showLibrePaymentStep ? 'Pagar Diferencia' : 'Usar Boleto Libre'}
+                        </DialogTitle>
+                      </DialogHeader>
+                      
+                      {!showLibrePaymentStep ? (
+                        <div className="space-y-4 pt-4">
+                          <div>
+                            <Label>Nombre del Pasajero</Label>
+                            <Input
+                              value={libreModifyForm.nombre}
+                              onChange={(e) => setLibreModifyForm({ ...libreModifyForm, nombre: e.target.value })}
+                              placeholder="Nombre completo"
+                              className="mt-1"
+                            />
+                          </div>
+                          <div>
+                            <Label>Email del Pasajero</Label>
+                            <Input
+                              type="email"
+                              value={libreModifyForm.email || ''}
+                              onChange={(e) => setLibreModifyForm({ ...libreModifyForm, email: e.target.value })}
+                              placeholder="correo@ejemplo.com"
+                              className="mt-1"
+                            />
+                          </div>
+                          <div>
+                            <Label>Ruta</Label>
+                            <Select value={libreModifyForm.rutaId} onValueChange={(v) => setLibreModifyForm({ ...libreModifyForm, rutaId: v, horarioId: '' })}>
+                              <SelectTrigger className="mt-1">
+                                <SelectValue placeholder="Selecciona una ruta" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {rutas.map((ruta) => (
+                                  <SelectItem key={ruta.id} value={ruta.id}>
+                                    {ruta.origen} → {ruta.destino} - ${ruta.precio.toFixed(2)}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div>
+                            <Label>Fecha</Label>
+                            <Input
+                              type="date"
+                              min={new Date().toISOString().split('T')[0]}
+                              max={boletoLibre.fecha_expiracion}
+                              value={libreModifyForm.fecha}
+                              onChange={(e) => setLibreModifyForm({ ...libreModifyForm, fecha: e.target.value })}
+                              className="mt-1"
+                            />
+                          </div>
+                          <div>
+                            <Label>Horario</Label>
+                            <Select 
+                              value={libreModifyForm.horarioId} 
+                              onValueChange={(v) => setLibreModifyForm({ ...libreModifyForm, horarioId: v })}
+                              disabled={!libreModifyForm.rutaId}
+                            >
+                              <SelectTrigger className="mt-1">
+                                <SelectValue placeholder="Selecciona un horario" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {horarios.map((horario) => (
+                                  <SelectItem key={horario.id} value={horario.id}>
+                                    {formatTime(horario.hora)}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+
+                          {/* Price summary */}
+                          {libreModifyForm.rutaId && (
+                            <div className="p-4 bg-secondary/30 rounded-lg space-y-2">
+                              <div className="flex justify-between text-sm">
+                                <span className="text-muted-foreground">Valor del boleto libre:</span>
+                                <span>${boletoLibre.valor.toFixed(2)}</span>
+                              </div>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-muted-foreground">Precio de la ruta:</span>
+                                <span>${rutas.find(r => r.id === libreModifyForm.rutaId)?.precio.toFixed(2) || '0.00'}</span>
+                              </div>
+                              <div className="border-t border-border pt-2 flex justify-between font-medium">
+                                <span>Diferencia a pagar:</span>
+                                <span className={librePrecioDiferencia > 0 ? 'text-primary' : 'text-success'}>
+                                  {librePrecioDiferencia > 0 ? `$${librePrecioDiferencia.toFixed(2)}` : 'Gratis'}
+                                </span>
+                              </div>
+                            </div>
+                          )}
+
+                          <Button 
+                            onClick={handleLibreContinueToPayment}
+                            disabled={!libreModifyForm.nombre || !libreModifyForm.email || !libreModifyForm.rutaId || !libreModifyForm.fecha || !libreModifyForm.horarioId}
+                            className="w-full"
+                          >
+                            {librePrecioDiferencia > 0 ? 'Continuar al Pago' : 'Confirmar Boleto'}
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="space-y-4 pt-4">
+                          <div className="p-4 bg-secondary/30 rounded-lg space-y-2">
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">Valor del boleto libre:</span>
+                              <span>${boletoLibre.valor.toFixed(2)}</span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground">Precio de la ruta:</span>
+                              <span>${rutas.find(r => r.id === libreModifyForm.rutaId)?.precio.toFixed(2)}</span>
+                            </div>
+                            <div className="border-t border-border pt-2 flex justify-between font-medium">
+                              <span>Diferencia a pagar:</span>
+                              <span className="text-primary">${librePrecioDiferencia.toFixed(2)}</span>
+                            </div>
+                          </div>
+
+                          <PaymentCardForm onValidChange={setIsLibreCardValid} />
+
+                          <div className="flex gap-3 pt-4">
+                            <Button variant="outline" onClick={() => setShowLibrePaymentStep(false)} className="flex-1">
+                              Atrás
+                            </Button>
+                            <Button 
+                              onClick={handleUsarBoletoLibre} 
+                              disabled={isUsingLibre || !isLibreCardValid} 
+                              className="flex-1"
+                            >
+                              {isUsingLibre ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <>
+                                  <CreditCard className="h-4 w-4" />
+                                  Pagar ${librePrecioDiferencia.toFixed(2)}
+                                </>
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </DialogContent>
+                  </Dialog>
                 )}
               </div>
             </div>
