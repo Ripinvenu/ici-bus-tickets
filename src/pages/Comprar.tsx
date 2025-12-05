@@ -10,6 +10,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/lib/auth-context';
 import { toast } from 'sonner';
 import { Ruta, Horario, TipoBoleto, PRECIOS_TIPO_BOLETO, LABELS_TIPO_BOLETO } from '@/types/database';
+import { PaymentCardForm } from '@/components/PaymentCardForm';
 import { z } from 'zod';
 
 const pasajeroSchema = z.object({
@@ -37,6 +38,7 @@ export default function Comprar() {
   const [tipoBoleto, setTipoBoleto] = useState<TipoBoleto>('adulto');
   const [pasajero, setPasajero] = useState({ nombre: '', email: '' });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [isCardValid, setIsCardValid] = useState(false);
 
   // Result
   const [folio, setFolio] = useState<string>('');
@@ -515,10 +517,13 @@ export default function Comprar() {
                     <CreditCard className="h-5 w-5 text-primary" />
                   </div>
                   <div>
-                    <h2 className="font-display text-xl font-semibold">Confirmar Pago</h2>
-                    <p className="text-sm text-muted-foreground">Revisa tu compra</p>
+                    <h2 className="font-display text-xl font-semibold">Datos de Pago</h2>
+                    <p className="text-sm text-muted-foreground">Ingresa los datos de tu tarjeta</p>
                   </div>
                 </div>
+
+                {/* Payment Card Form */}
+                <PaymentCardForm onValidChange={setIsCardValid} />
 
                 {/* Summary */}
                 <div className="bg-secondary/30 rounded-lg p-4 space-y-3">
@@ -560,7 +565,7 @@ export default function Comprar() {
                   <Button variant="outline" onClick={() => setStep('pasajero')} className="flex-1">
                     Atrás
                   </Button>
-                  <Button onClick={handleComprar} className="flex-1" disabled={isPurchasing}>
+                  <Button onClick={handleComprar} className="flex-1" disabled={isPurchasing || !isCardValid}>
                     {isPurchasing ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin" />

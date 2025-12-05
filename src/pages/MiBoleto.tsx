@@ -44,8 +44,10 @@ export default function MiBoleto() {
   const [precioDiferencia, setPrecioDiferencia] = useState(0);
 
   useEffect(() => {
-    if (searchParams.get('folio')) {
-      buscarBoleto();
+    const folioParam = searchParams.get('folio');
+    if (folioParam) {
+      setFolio(folioParam);
+      buscarBoletoByFolio(folioParam);
     }
   }, [searchParams]);
 
@@ -54,13 +56,18 @@ export default function MiBoleto() {
       toast.error('Ingresa un folio');
       return;
     }
+    navigate(`/mi-boleto?folio=${folio.trim().toUpperCase()}`, { replace: true });
+  };
 
+  const buscarBoletoByFolio = async (folioToSearch: string) => {
     setIsLoading(true);
     setBoleto(null);
     setBoletoLibre(null);
 
+    const searchFolio = folioToSearch.trim().toUpperCase();
+
     // First check for regular ticket
-    const { data: boletoData, error: boletoError } = await supabase
+    const { data: boletoData } = await supabase
       .from('boletos')
       .select(`
         *,
@@ -70,7 +77,7 @@ export default function MiBoleto() {
           horario:horarios(*)
         )
       `)
-      .eq('folio', folio.trim().toUpperCase())
+      .eq('folio', searchFolio)
       .maybeSingle();
 
     if (boletoData) {
@@ -97,7 +104,7 @@ export default function MiBoleto() {
     }
 
     // Check for free ticket
-    const { data: libreData, error: libreError } = await supabase
+    const { data: libreData } = await supabase
       .from('boletos_libres')
       .select(`
         *,
@@ -110,7 +117,7 @@ export default function MiBoleto() {
           )
         )
       `)
-      .eq('folio', folio.trim().toUpperCase())
+      .eq('folio', searchFolio)
       .maybeSingle();
 
     if (libreData) {
@@ -261,8 +268,8 @@ export default function MiBoleto() {
         .eq('id', boleto.id);
 
       toast.success('Boleto convertido a boleto libre');
-      setFolio(nuevoFolio);
-      setTimeout(() => buscarBoleto(), 500);
+      // Navigate to the new folio URL
+      navigate(`/mi-boleto?folio=${nuevoFolio}`, { replace: true });
     } catch (error) {
       console.error(error);
       toast.error('Error al convertir el boleto');
