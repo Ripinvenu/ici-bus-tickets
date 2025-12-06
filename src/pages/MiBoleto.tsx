@@ -85,47 +85,19 @@ export default function MiBoleto() {
 
     const searchFolio = folioToSearch.trim().toUpperCase();
 
-    // Use secure RPC function for guest lookup, or direct query for authenticated users
-    let boletoData = null;
-    
-    const { data: { user: currentUser } } = await supabase.auth.getUser();
-    
-    if (currentUser) {
-      // Authenticated users can query directly (RLS will filter)
-      const { data } = await supabase
-        .from('boletos')
-        .select(`
+    // First check for regular ticket
+    const { data: boletoData } = await supabase
+      .from('boletos')
+      .select(`
+        *,
+        corrida:corridas(
           *,
-          corrida:corridas(
-            *,
-            ruta:rutas(*),
-            horario:horarios(*)
-          )
-        `)
-        .eq('folio', searchFolio)
-        .maybeSingle();
-      boletoData = data;
-    } else {
-      // Guest users use secure RPC function
-      const { data: rpcData } = await supabase.rpc('get_boleto_by_folio', { p_folio: searchFolio });
-      if (rpcData && rpcData.length > 0) {
-        // Fetch full ticket with relations
-        const ticketId = rpcData[0].id;
-        const { data } = await supabase
-          .from('boletos')
-          .select(`
-            *,
-            corrida:corridas(
-              *,
-              ruta:rutas(*),
-              horario:horarios(*)
-            )
-          `)
-          .eq('id', ticketId)
-          .maybeSingle();
-        boletoData = data;
-      }
-    }
+          ruta:rutas(*),
+          horario:horarios(*)
+        )
+      `)
+      .eq('folio', searchFolio)
+      .maybeSingle();
 
     if (boletoData) {
       const processed = {

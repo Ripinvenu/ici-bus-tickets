@@ -291,19 +291,24 @@ export default function Comprar() {
         throw new Error('Error al generar folio');
       }
 
-      // 3. Create boleto using secure RPC function (works for guests too)
+      // 3. Create boleto
       const precio = calcularPrecio();
-      const { data: boletoId, error: boletoError } = await supabase.rpc('create_boleto', {
-        p_folio: folioData,
-        p_corrida_id: corridaId,
-        p_user_id: user?.id || null,
-        p_nombre_pasajero: pasajero.nombre,
-        p_email_pasajero: pasajero.email,
-        p_tipo_boleto: tipoBoleto,
-        p_precio_pagado: precio,
-      });
+      const { data: boleto, error: boletoError } = await supabase
+        .from('boletos')
+        .insert({
+          folio: folioData,
+          corrida_id: corridaId,
+          user_id: user?.id || null,
+          nombre_pasajero: pasajero.nombre,
+          email_pasajero: pasajero.email,
+          tipo_boleto: tipoBoleto,
+          precio_pagado: precio,
+          estado: 'activo',
+        })
+        .select()
+        .single();
 
-      if (boletoError || !boletoId) {
+      if (boletoError || !boleto) {
         throw new Error('Error al crear el boleto');
       }
 
@@ -319,7 +324,7 @@ export default function Comprar() {
           .from('boletos_libres')
           .update({ 
             usado: true, 
-            usado_en_boleto_id: boletoId 
+            usado_en_boleto_id: boleto.id 
           })
           .eq('id', boletoLibre.id);
       }
@@ -328,7 +333,7 @@ export default function Comprar() {
       if (user && !boletoLibre) {
         await supabase.from('historial_puntos').insert({
           user_id: user.id,
-          boleto_id: boletoId,
+          boleto_id: boleto.id,
           puntos: 1,
           tipo: 'ganado',
           descripcion: `Compra de boleto ${folioData}`,
