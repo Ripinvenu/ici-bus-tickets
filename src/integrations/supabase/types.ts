@@ -400,6 +400,18 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      create_boleto: {
+        Args: {
+          p_corrida_id: string
+          p_email_pasajero: string
+          p_folio: string
+          p_nombre_pasajero: string
+          p_precio_pagado: number
+          p_tipo_boleto: Database["public"]["Enums"]["tipo_boleto"]
+          p_user_id: string
+        }
+        Returns: string
+      }
       generate_folio: { Args: never; Returns: string }
       get_boleto_by_folio: {
         Args: { p_folio: string }
