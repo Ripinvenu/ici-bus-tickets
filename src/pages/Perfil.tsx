@@ -185,6 +185,8 @@ export default function Perfil() {
                         name="fecha_nacimiento"
                         type="date"
                         defaultValue={profile?.fecha_nacimiento ?? ''}
+                        onKeyDown={(e) => e.preventDefault()}
+                        className="cursor-pointer"
                       />
                     </div>
                     <div className="flex gap-2">
