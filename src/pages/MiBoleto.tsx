@@ -771,7 +771,8 @@ export default function MiBoleto() {
                                   max={boletoLibre?.fecha_expiracion || undefined}
                                   value={modifyForm.fecha}
                                   onChange={(e) => setModifyForm({ ...modifyForm, fecha: e.target.value })}
-                                  className="mt-1"
+                                  onKeyDown={(e) => e.preventDefault()}
+                                  className="mt-1 cursor-pointer"
                                 />
                               </div>
                               {horarios.length > 0 && (
@@ -1000,7 +1001,8 @@ export default function MiBoleto() {
                               max={boletoLibre.fecha_expiracion}
                               value={libreModifyForm.fecha}
                               onChange={(e) => setLibreModifyForm({ ...libreModifyForm, fecha: e.target.value })}
-                              className="mt-1"
+                              onKeyDown={(e) => e.preventDefault()}
+                              className="mt-1 cursor-pointer"
                             />
                           </div>
                           <div>

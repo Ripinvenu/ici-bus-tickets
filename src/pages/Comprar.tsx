@@ -642,7 +642,8 @@ export default function Comprar() {
                       min={getMinDate()}
                       value={selectedDate}
                       onChange={(e) => setSelectedDate(e.target.value)}
-                      className="mt-1"
+                      onKeyDown={(e) => e.preventDefault()}
+                      className="mt-1 cursor-pointer"
                     />
                   </div>
 
