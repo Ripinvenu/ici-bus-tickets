@@ -290,12 +290,33 @@ function HorariosManagement({ rutaId }: { rutaId: string }) {
 
   const deleteMutation = useMutation({
     mutationFn: async (id: string) => {
+      // Check if there are any corridas with sold tickets for this horario
+      const { data: corridas, error: checkError } = await supabase
+        .from('corridas')
+        .select('id, fecha, boletos_vendidos')
+        .eq('horario_id', id)
+        .gt('boletos_vendidos', 0);
+      
+      if (checkError) throw checkError;
+      
+      if (corridas && corridas.length > 0) {
+        const totalBoletos = corridas.reduce((sum, c) => sum + (c.boletos_vendidos || 0), 0);
+        throw new Error(`No se puede eliminar el horario porque hay ${totalBoletos} boleto(s) vendido(s) en ${corridas.length} corrida(s)`);
+      }
+      
       const { error } = await supabase.from('horarios').delete().eq('id', id);
       if (error) throw error;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['horarios', rutaId] });
       toast({ title: 'Horario eliminado' });
+    },
+    onError: (error: Error) => {
+      toast({ 
+        title: 'No se puede eliminar', 
+        description: error.message,
+        variant: 'destructive' 
+      });
     },
   });
 
