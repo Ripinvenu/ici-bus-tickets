@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { MapPin, Calendar, Clock, User, Mail, Ticket, CreditCard, Check, Loader2, ArrowRight, RefreshCw } from 'lucide-react';
+import { MapPin, Calendar, Clock, User, Mail, Ticket, CreditCard, Check, Loader2, ArrowRight, RefreshCw, Gift } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -28,6 +28,18 @@ interface BoletoLibre {
   usado: boolean;
 }
 
+interface RecompensaCanjeada {
+  id: string;
+  recompensa_id: string;
+  recompensa: {
+    id: string;
+    nombre: string;
+    descripcion: string | null;
+    descuento_porcentaje: number | null;
+    descuento_fijo: number | null;
+  };
+}
+
 export default function Comprar() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -52,6 +64,10 @@ export default function Comprar() {
   const [boletoLibre, setBoletoLibre] = useState<BoletoLibre | null>(null);
   const [diferenciaPagar, setDiferenciaPagar] = useState(0);
 
+  // Rewards state
+  const [recompensasDisponibles, setRecompensasDisponibles] = useState<RecompensaCanjeada[]>([]);
+  const [recompensaSeleccionada, setRecompensaSeleccionada] = useState<RecompensaCanjeada | null>(null);
+
   // Result
   const [folio, setFolio] = useState<string>('');
   const [disponibles, setDisponibles] = useState<number | null>(null);
@@ -70,6 +86,43 @@ export default function Comprar() {
       fetchBoletoLibre(libreParam);
     }
   }, [searchParams]);
+
+  // Fetch user's available rewards
+  useEffect(() => {
+    if (user) {
+      fetchRecompensasDisponibles();
+    }
+  }, [user]);
+
+  const fetchRecompensasDisponibles = async () => {
+    if (!user) return;
+    
+    const { data, error } = await supabase
+      .from('recompensas_canjeadas')
+      .select(`
+        id,
+        recompensa_id,
+        recompensa:recompensas (
+          id,
+          nombre,
+          descripcion,
+          descuento_porcentaje,
+          descuento_fijo
+        )
+      `)
+      .eq('user_id', user.id)
+      .eq('aplicada', false);
+
+    if (!error && data) {
+      // Transform the data to match our interface
+      const transformed = data.map(item => ({
+        id: item.id,
+        recompensa_id: item.recompensa_id,
+        recompensa: item.recompensa as unknown as RecompensaCanjeada['recompensa']
+      })).filter(item => item.recompensa !== null);
+      setRecompensasDisponibles(transformed);
+    }
+  };
 
   const fetchBoletoLibre = async (id: string) => {
     console.log('Buscando boleto libre con ID:', id);
@@ -175,12 +228,36 @@ export default function Comprar() {
   };
 
   const calcularPrecioAPagar = () => {
-    const precioTotal = calcularPrecio();
-    if (boletoLibre) {
-      const diferencia = precioTotal - boletoLibre.valor;
-      return diferencia > 0 ? diferencia : 0;
+    let precioTotal = calcularPrecio();
+    
+    // Apply reward discount first (only 1 reward per ticket)
+    if (recompensaSeleccionada) {
+      const { recompensa } = recompensaSeleccionada;
+      if (recompensa.descuento_porcentaje) {
+        precioTotal = precioTotal * (1 - recompensa.descuento_porcentaje / 100);
+      } else if (recompensa.descuento_fijo) {
+        precioTotal = precioTotal - recompensa.descuento_fijo;
+      }
     }
-    return precioTotal;
+    
+    // Then apply free ticket value
+    if (boletoLibre) {
+      precioTotal = precioTotal - boletoLibre.valor;
+    }
+    
+    return Math.max(0, precioTotal);
+  };
+
+  const calcularDescuentoRecompensa = () => {
+    if (!recompensaSeleccionada) return 0;
+    const precioBase = calcularPrecio();
+    const { recompensa } = recompensaSeleccionada;
+    if (recompensa.descuento_porcentaje) {
+      return precioBase * (recompensa.descuento_porcentaje / 100);
+    } else if (recompensa.descuento_fijo) {
+      return Math.min(recompensa.descuento_fijo, precioBase);
+    }
+    return 0;
   };
 
   // Update diferencia when ruta or tipo changes
@@ -291,8 +368,8 @@ export default function Comprar() {
         throw new Error('Error al generar folio');
       }
 
-      // 3. Create boleto
-      const precio = calcularPrecio();
+      // 3. Create boleto - use the actual paid price
+      const precioPagado = calcularPrecioAPagar();
       const { data: boleto, error: boletoError } = await supabase
         .from('boletos')
         .insert({
@@ -302,7 +379,7 @@ export default function Comprar() {
           nombre_pasajero: pasajero.nombre,
           email_pasajero: pasajero.email,
           tipo_boleto: tipoBoleto,
-          precio_pagado: precio,
+          precio_pagado: precioPagado,
           estado: 'activo',
         })
         .select()
@@ -329,8 +406,20 @@ export default function Comprar() {
           .eq('id', boletoLibre.id);
       }
 
-      // 6. If user is logged in, add loyalty points (only for paid purchases, not free ticket redemptions)
-      if (user && !boletoLibre) {
+      // 6. If using a reward, mark it as applied
+      if (recompensaSeleccionada) {
+        await supabase
+          .from('recompensas_canjeadas')
+          .update({ 
+            aplicada: true, 
+            aplicada_at: new Date().toISOString(),
+            boleto_aplicado_id: boleto.id 
+          })
+          .eq('id', recompensaSeleccionada.id);
+      }
+
+      // 7. If user is logged in, add loyalty points (only for paid purchases, not free ticket redemptions)
+      if (user && !boletoLibre && !recompensaSeleccionada) {
         await supabase.from('historial_puntos').insert({
           user_id: user.id,
           boleto_id: boleto.id,
@@ -455,12 +544,20 @@ export default function Comprar() {
                         <span className="text-sm text-muted-foreground">Precio del boleto:</span>
                         <span className="text-lg font-bold text-primary">${calcularPrecio().toFixed(2)}</span>
                       </div>
+                      {recompensaSeleccionada && (
+                        <div className="flex justify-between text-success">
+                          <span className="text-sm">Recompensa aplicada:</span>
+                          <span className="text-lg font-medium">-${calcularDescuentoRecompensa().toFixed(2)}</span>
+                        </div>
+                      )}
                       {boletoLibre && (
+                        <div className="flex justify-between text-success">
+                          <span className="text-sm">Valor del boleto libre:</span>
+                          <span className="text-lg font-medium">-${boletoLibre.valor.toFixed(2)}</span>
+                        </div>
+                      )}
+                      {(boletoLibre || recompensaSeleccionada) && (
                         <>
-                          <div className="flex justify-between">
-                            <span className="text-sm text-muted-foreground">Valor del boleto libre:</span>
-                            <span className="text-lg font-medium text-success">-${boletoLibre.valor.toFixed(2)}</span>
-                          </div>
                           <div className="border-t border-border pt-2 flex justify-between">
                             <span className="text-sm font-medium">A pagar:</span>
                             <span className="text-xl font-bold text-primary">
@@ -471,6 +568,47 @@ export default function Comprar() {
                             <p className="text-sm text-success">¡No necesitas pagar nada adicional!</p>
                           )}
                         </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Reward Selection - Only show if user has rewards and not using free ticket */}
+                  {user && recompensasDisponibles.length > 0 && !boletoLibre && (
+                    <div className="p-4 bg-accent/10 border border-accent/30 rounded-lg space-y-3">
+                      <div className="flex items-center gap-2">
+                        <Gift className="h-4 w-4 text-accent" />
+                        <span className="font-medium text-accent-foreground">Aplicar Recompensa (solo 1 por boleto)</span>
+                      </div>
+                      <div className="space-y-2">
+                        {recompensasDisponibles.map((rc) => (
+                          <button
+                            key={rc.id}
+                            type="button"
+                            onClick={() => setRecompensaSeleccionada(recompensaSeleccionada?.id === rc.id ? null : rc)}
+                            className={`w-full text-left p-3 rounded-lg border-2 transition-all ${
+                              recompensaSeleccionada?.id === rc.id
+                                ? 'border-accent bg-accent/20'
+                                : 'border-border hover:border-accent/50'
+                            }`}
+                          >
+                            <div className="font-medium">{rc.recompensa.nombre}</div>
+                            <div className="text-sm text-muted-foreground">
+                              {rc.recompensa.descuento_porcentaje 
+                                ? `${rc.recompensa.descuento_porcentaje}% de descuento` 
+                                : `$${rc.recompensa.descuento_fijo?.toFixed(2)} de descuento`}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                      {recompensaSeleccionada && (
+                        <Button 
+                          variant="ghost" 
+                          size="sm" 
+                          onClick={() => setRecompensaSeleccionada(null)}
+                          className="text-muted-foreground"
+                        >
+                          Quitar recompensa
+                        </Button>
                       )}
                     </div>
                   )}
@@ -652,6 +790,22 @@ export default function Comprar() {
                   </div>
                 )}
 
+                {/* Reward info */}
+                {recompensaSeleccionada && (
+                  <div className="bg-success/10 border border-success/30 rounded-lg p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Gift className="h-4 w-4 text-success" />
+                      <span className="font-medium text-success">Recompensa Aplicada</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {recompensaSeleccionada.recompensa.nombre}
+                    </p>
+                    <p className="text-sm text-success">
+                      Descuento: ${calcularDescuentoRecompensa().toFixed(2)}
+                    </p>
+                  </div>
+                )}
+
                 {/* Summary */}
                 <div className="bg-secondary/30 rounded-lg p-4 space-y-3">
                   <div className="flex justify-between">
@@ -674,16 +828,24 @@ export default function Comprar() {
                     <span className="text-muted-foreground">Tipo</span>
                     <span className="font-medium">{LABELS_TIPO_BOLETO[tipoBoleto]}</span>
                   </div>
-                  {boletoLibre && (
+                  {(boletoLibre || recompensaSeleccionada) && (
                     <>
                       <div className="flex justify-between text-muted-foreground">
                         <span>Precio boleto</span>
                         <span>${calcularPrecio().toFixed(2)}</span>
                       </div>
-                      <div className="flex justify-between text-success">
-                        <span>Boleto libre aplicado</span>
-                        <span>-${boletoLibre.valor.toFixed(2)}</span>
-                      </div>
+                      {recompensaSeleccionada && (
+                        <div className="flex justify-between text-success">
+                          <span>Recompensa aplicada</span>
+                          <span>-${calcularDescuentoRecompensa().toFixed(2)}</span>
+                        </div>
+                      )}
+                      {boletoLibre && (
+                        <div className="flex justify-between text-success">
+                          <span>Boleto libre aplicado</span>
+                          <span>-${boletoLibre.valor.toFixed(2)}</span>
+                        </div>
+                      )}
                     </>
                   )}
                   <div className="border-t border-border pt-3 flex justify-between">
